@@ -1,6 +1,21 @@
 name: rav1e
 
 on:
+  workflow_dispatch:
+    inputs:
+      leg:
+        description: "baseline (uninstrumented) or instrumented (under chalk/curiosity)"
+        type: choice
+        options: [instrumented, baseline]
+        default: instrumented
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token, echoed into the run name"
+        type: string
+        default: ""
   push:
     branches:
       - master
@@ -10,12 +25,35 @@ on:
       - master
       - 0.*
 
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  # The one variable that separates the arms: on baseline, action-checkout
+  # skips its Set up Chalk step entirely.
+  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+
+run-name: "rav1e ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
+
 jobs:
   rustfmt-clippy:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: ilammy/setup-nasm@v1
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
@@ -37,9 +75,21 @@ jobs:
       RUSTFLAGS: "-Dwarnings"
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
 
       # Minimum version in build.rs
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - name: Install NASM 2.15
         uses: ilammy/setup-nasm@v1
         with:
@@ -81,7 +131,18 @@ jobs:
       CARGO_TARGET_WASM32_WASIP2_RUNNER: wasmtime
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
 
       - name: Install wasmtime
         uses: taiki-e/install-action@wasmtime
@@ -100,6 +161,7 @@ jobs:
 
   build-unix:
     strategy:
+      fail-fast: false
       matrix:
         conf:
           - beta-build
@@ -154,7 +216,19 @@ jobs:
     needs: [rustfmt-clippy, msrv]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - name: Set no-asm-tests env vars
         if: matrix.conf == 'no-asm-tests'
         run: |
@@ -326,170 +400,4 @@ jobs:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
 
-  build-macos:
-    strategy:
-      matrix:
-        include:
-          - name: Cargo build (x64)
-            conf: cargo-build
-            target: x86_64-apple-darwin
-          - name: Cargo test (x64)
-            conf: cargo-test
-            target: x86_64-apple-darwin
-          - name: Cargo C-build (x64)
-            conf: cargo-c
-            target: x86_64-apple-darwin
-          - name: Cargo build (Arm64)
-            conf: cargo-build
-            target: aarch64-apple-darwin
-          - name: Cargo C-build (Arm64)
-            conf: cargo-c
-            target: aarch64-apple-darwin
 
-    env:
-      RUST_BACKTRACE: full
-      RUSTC_WRAPPER: sccache
-      SCCACHE_CACHE_SIZE: 300M
-      SCCACHE_DIR: /Users/runner/Library/Caches/Mozilla.sccache
-
-    runs-on: macos-latest
-    needs: [rustfmt-clippy, msrv]
-
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install sccache
-        run: |
-          brew install sccache
-      - name: Install nasm
-        run: |
-          brew install nasm
-      - name: Install cargo-c
-        if: matrix.conf == 'cargo-c'
-        run: |
-          brew install cargo-c
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          target: ${{ matrix.target }}
-      - name: Generate Cargo.version for cache key
-        run: |
-          cargo --version > Cargo.version
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        continue-on-error: true
-        with:
-          path: ~/.cargo/registry/cache
-          key: ${{ runner.os }}-${{ matrix.conf }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.conf }}-cargo-registry-
-      - name: Cache sccache output
-        uses: actions/cache@v4
-        continue-on-error: true
-        with:
-          path: /Users/runner/Library/Caches/Mozilla.sccache
-          key: ${{ runner.os }}-${{ matrix.conf }}-sccache-${{ hashFiles('**/Cargo.*') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.conf }}-sccache-
-      - name: Start sccache server
-        run: |
-          sccache --start-server
-      - name: Build
-        if: matrix.conf == 'cargo-build'
-        run: |
-          cargo build --release --target=${{ matrix.target }}
-      - name: Test
-        if: matrix.conf == 'cargo-test'
-        run: |
-          cargo test --workspace --verbose --target=${{ matrix.target }}
-      - name: Run cargo-c
-        if: matrix.conf == 'cargo-c'
-        env:
-          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: git
-        run: |
-          cargo fetch
-          cargo cbuild --target=${{ matrix.target }}
-      - name: Stop sccache server
-        run: |
-          sccache --stop-server
-
-  build-windows:
-    strategy:
-      matrix:
-        include:
-          - conf: cargo-build
-            target: x86_64-pc-windows-msvc
-          - conf: cargo-test
-            target: x86_64-pc-windows-msvc
-          - conf: cargo-c
-            target: x86_64-pc-windows-gnu
-
-    env:
-      RUST_BACKTRACE: full
-      RUSTC_WRAPPER: sccache
-      SCCACHE_CACHE_SIZE: 300M
-      SCCACHE_DIR: C:\sccache
-
-    runs-on: windows-latest
-    needs: [rustfmt-clippy, msrv]
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ilammy/setup-nasm@v1
-      - name: Install sccache
-        run: |
-          $LINK = "https://github.com/mozilla/sccache/releases/download/0.2.12"
-          $SCCACHE_FILE = "sccache-0.2.12-x86_64-pc-windows-msvc"
-          curl -LO "$LINK/$SCCACHE_FILE.tar.gz"
-          tar xzf "$SCCACHE_FILE.tar.gz"
-          echo "$Env:GITHUB_WORKSPACE/$SCCACHE_FILE" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Install stable-${{ matrix.target }}
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable-${{ matrix.target }}
-      - name: Install cargo-c
-        if: matrix.conf == 'cargo-c'
-        run: |
-          $LINK = "https://github.com/lu-zero/cargo-c/releases/latest/download"
-          $CARGO_C_FILE = "cargo-c-windows-msvc"
-          curl -LO "$LINK/$CARGO_C_FILE.zip"
-          7z e -y "$CARGO_C_FILE.zip" -o"${env:USERPROFILE}\.cargo\bin"
-      - name: Generate Cargo.version for cache key
-        run: |
-          cargo --version > Cargo.version
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        continue-on-error: true
-        with:
-          path: ~/.cargo/registry/cache
-          key: ${{ runner.os }}-${{ matrix.conf }}-${{ matrix.target }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.conf }}-${{ matrix.target }}-cargo-registry-
-      - name: Cache sccache output
-        uses: actions/cache@v4
-        continue-on-error: true
-        with:
-          path: C:\sccache
-          key: ${{ runner.os }}-${{ matrix.conf }}-${{ matrix.target }}-sccache-${{ hashFiles('**/Cargo.*') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.conf }}-${{ matrix.target }}-sccache-
-      - name: Start sccache server
-        run: |
-          sccache --start-server
-      - name: Build
-        if: matrix.conf == 'cargo-build'
-        run: |
-          cargo build --release
-      - name: Test
-        if: matrix.conf == 'cargo-test'
-        run: |
-          cargo test --workspace --verbose
-      - name: Run cargo-c
-        if: matrix.conf == 'cargo-c'
-        env:
-          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: git
-        run: |
-          cargo fetch
-          cargo cbuild
-      - name: Stop sccache server
-        run: |
-          sccache --stop-server
